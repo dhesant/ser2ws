@@ -1,24 +1,50 @@
+#!/usr/bin/python3
 import sys
 import ssl
 import signal
-from optparse import OptionParser
-from SimpleWebSocketServer import SimpleWebSocketServer, WebSocket
+import traceback
+import argparse
+from SimpleWebSocketServer import SimpleWebSocketServer, SimpleSSLWebSocketServer, WebSocket
 import serial
+import serial.threaded
 
-connections = [];
+wsConnections = []
+serialTransports = []
+
 class SimpleServer(WebSocket):
     def handleMessage(self):
-        # Serial.write(self.data)
-        self.message(self.data)
+        print("WebSocket: ", self.address, self.data)
+        self.sendMessage(">Sent: " + self.data)
+        for transport in serialTransports:
+            transport.write_line(self.data)
 
     def handleConnected(self):
-        print(self.address, 'connected')
-        connections.append(self)
+        print("WebSocket: ", "Connected", self.address)
+        wsConnections.append(self)
 
     def handleClose(self):
-        clients.remove(self)
-        print(self.address, 'closed')
+        wsConnections.remove(self)
+        print("WebSocket: ", "Closed", self.address)
         
+class SimpleSerial(serial.threaded.LineReader):
+    def connection_made(self, transport):
+        super(SimpleSerial, self).connection_made(transport)
+        serialTransports.append(self)
+        print("Connected to", transport.name)
+
+    def handle_line(self, data):
+        print("Serial:", data)
+        for con in wsConnections:
+            con.sendMessage(data)
+
+    def connection_lost(self, exc):
+        serialTransports.remove(self)
+        print("Closed Port")
+        if exc:
+            traceback.print_exc(exc)
+            sys.exit(1)
+        sys.exit(0)
+
 if __name__ == "__main__":
     # Test python version
     if sys.version_info < (3, 4):
@@ -30,27 +56,63 @@ if __name__ == "__main__":
         print("Wrong pyserial version, required is at least 3.0")
         exit(1)
 
-    print("Init Complete")
-        
-    parser = OptionParser(usage="usage: %prog [options]", version="%prog 1.0")
-    parser.add_option("--host", default='', type='string', action="store", dest="host", help="hostname (localhost)")
-    parser.add_option("--port", default=8989, type='int', action="store", dest="port", help="port (8000)")
-    parser.add_option("--ssl", default=0, type='int', action="store", dest="ssl", help="ssl (1: on, 0: off (default))")
-    parser.add_option("--cert", default='./cert.pem', type='string', action="store", dest="cert", help="cert (./cert.pem)")
-    parser.add_option("--key", default='./key.pem', type='string', action="store", dest="key", help="key (./key.pem)")
-    parser.add_option("--ver", default=ssl.PROTOCOL_TLSv1, type=int, action="store", dest="ver", help="ssl version")
-    (options, args) = parser.parse_args()
+    parser = argparse.ArgumentParser(description="ser2ws v1.0.0")
+    parser.add_argument(
+        '-V', '--version', action='version', version="ser2ws v1.0.0")
+    parser.add_argument(
+        '-v', '--verbose', action='count', default=0,
+        help="Enable verbose output")
+    parser.add_argument(
+        '-l', '--listen', default=':8989',
+        help="Listen URL (default: :8989)")
+    parser.add_argument(
+        'port',
+        help="Serial port (example: /dev/ttyUSB0)")
+    parser.add_argument(
+        'baud', type=int,
+        help="Serial baud rate (example: 115200)")
+    # parser.add_argument(
+    #     '--parity', nargs='?', default='NONE', choices=['NONE', 'EVEN', 'ODD'],
+    #     help="Serial parity")
+    # parser.add_argument(
+    #     '--stopbits', nargs='?', type=int, default=1, choices=[1, 2],
+    #     help="Serial  stop bits")
+    parser.add_argument(
+        '--ssl', action='store_true',
+        help="Enable SSL")
+    parser.add_argument(
+        '--cert', nargs=1, 
+        help="SSL Certificate (example: ./cert.pem)")
+    parser.add_argument(
+        '--key', nargs=1, 
+        help="SSL Key File (example: ./key.pem)")
+    parser.add_argument(
+        '--sslver', type=int, default=ssl.PROTOCOL_TLSv1_2,
+        help="SSL Protocol Version (example: 5)")
+    args = parser.parse_args()
 
-    print("Starting server at " + options.host + ":" + options.port + "with SSL" if (options.ssl == 1) else "")
+    address, port = args.listen.split(':')
+    if not address:
+        address = ''
+    port = int(port) if port else 8989
     
-    if options.ssl == 1:
-        server = SimpleSSLWebSocketServer(options.host, options.port, SimpleServer, options.cert, options.key, version=options.ver)
+    print("Starting server at " + address + ":" + str(port))
+    if(args.ssl):
+        print("SSL Enabled")
+    
+    if args.ssl:
+        server = SimpleSSLWebSocketServer(address, port, SimpleServer, args.cert, args.key, version=args.sslver)
     else:
-        server = SimpleWebSocketServer(options.host, options.port, SimpleServer)
+        server = SimpleWebSocketServer(address, port, SimpleServer)
+
+    ser = serial.Serial(args.port, baudrate = args.baud, timeout=1)
+    serial = serial.threaded.ReaderThread(ser, SimpleSerial)
+    serial.start()
 
     def close_sig_handler(signal, frame):
+        serial.close()
         server.close()
-        sys.exit()
+        sys.exit(0)
 
     signal.signal(signal.SIGINT, close_sig_handler)
     server.serveforever()
