@@ -10,27 +10,29 @@ import serial.threaded
 
 wsConnections = []
 serialTransports = []
+device = ""
 
 class SimpleServer(WebSocket):
     def handleMessage(self):
-        print("WebSocket: ", self.address, self.data)
-        self.sendMessage(">Sent: " + self.data)
+        print("WebSocket:", self.address, self.data)
+        for con in wsConnections:
+            con.sendMessage("$" + self.data)
         for transport in serialTransports:
             transport.write_line(self.data)
 
     def handleConnected(self):
-        print("WebSocket: ", "Connected", self.address)
+        print("WebSocket:", self.address, "Connected")
         wsConnections.append(self)
 
     def handleClose(self):
         wsConnections.remove(self)
-        print("WebSocket: ", "Closed", self.address)
+        print("WebSocket:", self.address, "Closed")
         
 class SimpleSerial(serial.threaded.LineReader):
     def connection_made(self, transport):
         super(SimpleSerial, self).connection_made(transport)
         serialTransports.append(self)
-        print("Connected to", transport.name)
+        print("Connected to", device)
 
     def handle_line(self, data):
         print("Serial:", data)
@@ -106,9 +108,10 @@ if __name__ == "__main__":
         server = SimpleWebSocketServer(address, port, SimpleServer)
 
     ser = serial.Serial(args.port, baudrate = args.baud, timeout=1)
+    device = ser.name
     serial = serial.threaded.ReaderThread(ser, SimpleSerial)
     serial.start()
-
+    
     def close_sig_handler(signal, frame):
         serial.close()
         server.close()
